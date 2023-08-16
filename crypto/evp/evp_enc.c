@@ -144,7 +144,10 @@ static int evp_cipher_init_internal(EVP_CIPHER_CTX *ctx,
 #if !defined(OPENSSL_NO_ENGINE) && !defined(FIPS_MODULE)
             || tmpimpl != NULL
 #endif
-            || impl != NULL) {
+            || impl != NULL
+            || (cipher != NULL && cipher->origin == EVP_ORIG_METH)
+            || (cipher == NULL && ctx->cipher != NULL
+                               && ctx->cipher->origin == EVP_ORIG_METH)) {
         if (ctx->cipher == ctx->fetched_cipher)
             ctx->cipher = NULL;
         EVP_CIPHER_free(ctx->fetched_cipher);
@@ -156,10 +159,11 @@ static int evp_cipher_init_internal(EVP_CIPHER_CTX *ctx,
      * (legacy code)
      */
     if (cipher != NULL && ctx->cipher != NULL) {
+        if (ctx->cipher->cleanup != NULL && !ctx->cipher->cleanup(ctx))
+            return 0;
         OPENSSL_clear_free(ctx->cipher_data, ctx->cipher->ctx_size);
         ctx->cipher_data = NULL;
     }
-
 
     /* Start of non-legacy code below */
 
@@ -309,7 +313,6 @@ static int evp_cipher_init_internal(EVP_CIPHER_CTX *ctx,
             ctx->cipher_data = OPENSSL_zalloc(ctx->cipher->ctx_size);
             if (ctx->cipher_data == NULL) {
                 ctx->cipher = NULL;
-                ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
                 return 0;
             }
         } else {
@@ -618,7 +621,7 @@ int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
     size_t soutl, inl_ = (size_t)inl;
     int blocksize;
 
-    if (outl != NULL) {
+    if (likely(outl != NULL)) {
         *outl = 0;
     } else {
         ERR_raise(ERR_LIB_EVP, ERR_R_PASSED_NULL_PARAMETER);
@@ -626,22 +629,22 @@ int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
     }
 
     /* Prevent accidental use of decryption context when encrypting */
-    if (!ctx->encrypt) {
+    if (unlikely(!ctx->encrypt)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_INVALID_OPERATION);
         return 0;
     }
 
-    if (ctx->cipher == NULL) {
+    if (unlikely(ctx->cipher == NULL)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_NO_CIPHER_SET);
         return 0;
     }
 
-    if (ctx->cipher->prov == NULL)
+    if (unlikely(ctx->cipher->prov == NULL))
         goto legacy;
 
     blocksize = ctx->cipher->block_size;
 
-    if (ctx->cipher->cupdate == NULL  || blocksize < 1) {
+    if (unlikely(ctx->cipher->cupdate == NULL || blocksize < 1)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_UPDATE_ERROR);
         return 0;
     }
@@ -650,7 +653,7 @@ int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
                                inl_ + (size_t)(blocksize == 1 ? 0 : blocksize),
                                in, inl_);
 
-    if (ret) {
+    if (likely(ret)) {
         if (soutl > INT_MAX) {
             ERR_raise(ERR_LIB_EVP, EVP_R_UPDATE_ERROR);
             return 0;
@@ -767,7 +770,7 @@ int EVP_DecryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
     size_t soutl, inl_ = (size_t)inl;
     int blocksize;
 
-    if (outl != NULL) {
+    if (likely(outl != NULL)) {
         *outl = 0;
     } else {
         ERR_raise(ERR_LIB_EVP, ERR_R_PASSED_NULL_PARAMETER);
@@ -775,21 +778,21 @@ int EVP_DecryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
     }
 
     /* Prevent accidental use of encryption context when decrypting */
-    if (ctx->encrypt) {
+    if (unlikely(ctx->encrypt)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_INVALID_OPERATION);
         return 0;
     }
 
-    if (ctx->cipher == NULL) {
+    if (unlikely(ctx->cipher == NULL)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_NO_CIPHER_SET);
         return 0;
     }
-    if (ctx->cipher->prov == NULL)
+    if (unlikely(ctx->cipher->prov == NULL))
         goto legacy;
 
     blocksize = EVP_CIPHER_CTX_get_block_size(ctx);
 
-    if (ctx->cipher->cupdate == NULL || blocksize < 1) {
+    if (unlikely(ctx->cipher->cupdate == NULL || blocksize < 1)) {
         ERR_raise(ERR_LIB_EVP, EVP_R_UPDATE_ERROR);
         return 0;
     }
@@ -797,7 +800,7 @@ int EVP_DecryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl,
                                inl_ + (size_t)(blocksize == 1 ? 0 : blocksize),
                                in, inl_);
 
-    if (ret) {
+    if (likely(ret)) {
         if (soutl > INT_MAX) {
             ERR_raise(ERR_LIB_EVP, EVP_R_UPDATE_ERROR);
             return 0;
@@ -1079,6 +1082,11 @@ int EVP_CIPHER_CTX_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void *ptr)
 
     switch (type) {
     case EVP_CTRL_SET_KEY_LENGTH:
+        if (arg < 0)
+            return 0;
+        if (ctx->key_len == arg)
+            /* Skip calling into provider if unchanged. */
+            return 1;
         params[0] = OSSL_PARAM_construct_size_t(OSSL_CIPHER_PARAM_KEYLEN, &sz);
         ctx->key_len = -1;
         break;
@@ -1104,6 +1112,9 @@ int EVP_CIPHER_CTX_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void *ptr)
     case EVP_CTRL_AEAD_SET_IVLEN:
         if (arg < 0)
             return 0;
+        if (ctx->iv_len == arg)
+            /* Skip calling into provider if unchanged. */
+            return 1;
         params[0] = OSSL_PARAM_construct_size_t(OSSL_CIPHER_PARAM_IVLEN, &sz);
         ctx->iv_len = -1;
         break;
@@ -1454,7 +1465,6 @@ int EVP_CIPHER_CTX_copy(EVP_CIPHER_CTX *out, const EVP_CIPHER_CTX *in)
         out->cipher_data = OPENSSL_malloc(in->cipher->ctx_size);
         if (out->cipher_data == NULL) {
             out->cipher = NULL;
-            ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
             return 0;
         }
         memcpy(out->cipher_data, in->cipher_data, in->cipher->ctx_size);
@@ -1473,13 +1483,9 @@ EVP_CIPHER *evp_cipher_new(void)
 {
     EVP_CIPHER *cipher = OPENSSL_zalloc(sizeof(EVP_CIPHER));
 
-    if (cipher != NULL) {
-        cipher->lock = CRYPTO_THREAD_lock_new();
-        if (cipher->lock == NULL) {
-            OPENSSL_free(cipher);
-            return NULL;
-        }
-        cipher->refcnt = 1;
+    if (cipher != NULL && !CRYPTO_NEW_REF(&cipher->refcnt, 1)) {
+        OPENSSL_free(cipher);
+        return NULL;
     }
     return cipher;
 }
@@ -1524,7 +1530,7 @@ static void *evp_cipher_from_algorithm(const int name_id,
     int fnciphcnt = 0, fnctxcnt = 0;
 
     if ((cipher = evp_cipher_new()) == NULL) {
-        ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_EVP, ERR_R_EVP_LIB);
         return NULL;
     }
 
@@ -1679,7 +1685,7 @@ int EVP_CIPHER_up_ref(EVP_CIPHER *cipher)
     int ref = 0;
 
     if (cipher->origin == EVP_ORIG_DYNAMIC)
-        CRYPTO_UP_REF(&cipher->refcnt, &ref, cipher->lock);
+        CRYPTO_UP_REF(&cipher->refcnt, &ref);
     return 1;
 }
 
@@ -1687,7 +1693,7 @@ void evp_cipher_free_int(EVP_CIPHER *cipher)
 {
     OPENSSL_free(cipher->type_name);
     ossl_provider_free(cipher->prov);
-    CRYPTO_THREAD_lock_free(cipher->lock);
+    CRYPTO_FREE_REF(&cipher->refcnt);
     OPENSSL_free(cipher);
 }
 
@@ -1698,7 +1704,7 @@ void EVP_CIPHER_free(EVP_CIPHER *cipher)
     if (cipher == NULL || cipher->origin != EVP_ORIG_DYNAMIC)
         return;
 
-    CRYPTO_DOWN_REF(&cipher->refcnt, &i, cipher->lock);
+    CRYPTO_DOWN_REF(&cipher->refcnt, &i);
     if (i > 0)
         return;
     evp_cipher_free_int(cipher);

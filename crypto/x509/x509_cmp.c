@@ -184,7 +184,7 @@ int X509_cmp(const X509 *a, const X509 *b)
 int ossl_x509_add_cert_new(STACK_OF(X509) **p_sk, X509 *cert, int flags)
 {
     if (*p_sk == NULL && (*p_sk = sk_X509_new_null()) == NULL) {
-        ERR_raise(ERR_LIB_X509, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_X509, ERR_R_CRYPTO_LIB);
         return 0;
     }
     return X509_add_cert(*p_sk, cert, flags);
@@ -216,7 +216,7 @@ int X509_add_cert(STACK_OF(X509) *sk, X509 *cert, int flags)
     }
     if (!sk_X509_insert(sk, cert,
                         (flags & X509_ADD_FLAG_PREPEND) != 0 ? 0 : -1)) {
-        ERR_raise(ERR_LIB_X509, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_X509, ERR_R_CRYPTO_LIB);
         return 0;
     }
     if ((flags & X509_ADD_FLAG_UP_REF) != 0)
@@ -277,11 +277,11 @@ int X509_NAME_cmp(const X509_NAME *a, const X509_NAME *b)
     if (ret == 0 && a->canon_enclen == 0)
         return 0;
 
-    if (a->canon_enc == NULL || b->canon_enc == NULL)
-        return -2;
-
-    if (ret == 0)
+    if (ret == 0) {
+        if (a->canon_enc == NULL || b->canon_enc == NULL)
+            return -2;
         ret = memcmp(a->canon_enc, b->canon_enc, a->canon_enclen);
+    }
 
     return ret < 0 ? -1 : ret > 0;
 }

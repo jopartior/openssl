@@ -581,7 +581,7 @@ static ASN1_TYPE *asn1_str2type(const char *str, int format, int utype)
     int no_unused = 1;
 
     if ((atmp = ASN1_TYPE_new()) == NULL) {
-        ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
         return NULL;
     }
 
@@ -642,11 +642,11 @@ static ASN1_TYPE *asn1_str2type(const char *str, int format, int utype)
             goto bad_form;
         }
         if ((atmp->value.asn1_string = ASN1_STRING_new()) == NULL) {
-            ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
             goto bad_str;
         }
         if (!ASN1_STRING_set(atmp->value.asn1_string, str, -1)) {
-            ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
             goto bad_str;
         }
         atmp->value.asn1_string->type = utype;
@@ -677,7 +677,7 @@ static ASN1_TYPE *asn1_str2type(const char *str, int format, int utype)
 
         if (ASN1_mbstring_copy(&atmp->value.asn1_string, (unsigned char *)str,
                                -1, format, ASN1_tag2bit(utype)) <= 0) {
-            ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
             goto bad_str;
         }
 
@@ -686,7 +686,7 @@ static ASN1_TYPE *asn1_str2type(const char *str, int format, int utype)
     case V_ASN1_BIT_STRING:
     case V_ASN1_OCTET_STRING:
         if ((atmp->value.asn1_string = ASN1_STRING_new()) == NULL) {
-            ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
             goto bad_form;
         }
 
@@ -698,9 +698,12 @@ static ASN1_TYPE *asn1_str2type(const char *str, int format, int utype)
             atmp->value.asn1_string->data = rdata;
             atmp->value.asn1_string->length = rdlen;
             atmp->value.asn1_string->type = utype;
-        } else if (format == ASN1_GEN_FORMAT_ASCII)
-            ASN1_STRING_set(atmp->value.asn1_string, str, -1);
-        else if ((format == ASN1_GEN_FORMAT_BITLIST)
+        } else if (format == ASN1_GEN_FORMAT_ASCII) {
+            if (!ASN1_STRING_set(atmp->value.asn1_string, str, -1)) {
+                ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
+                goto bad_str;
+            }
+        } else if ((format == ASN1_GEN_FORMAT_BITLIST)
                  && (utype == V_ASN1_BIT_STRING)) {
             if (!CONF_parse_list
                 (str, ',', 1, bitstr_cb, atmp->value.bit_string)) {
@@ -750,7 +753,7 @@ static int bitstr_cb(const char *elem, int len, void *bitstr)
         return 0;
     }
     if (!ASN1_BIT_STRING_set_bit(bitstr, bitnum, 1)) {
-        ERR_raise(ERR_LIB_ASN1, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_ASN1, ERR_R_ASN1_LIB);
         return 0;
     }
     return 1;

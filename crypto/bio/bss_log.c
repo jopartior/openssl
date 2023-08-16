@@ -24,6 +24,8 @@
 
 #if defined(OPENSSL_SYS_WINCE)
 #elif defined(OPENSSL_SYS_WIN32)
+#elif defined(__wasi__)
+# define NO_SYSLOG
 #elif defined(OPENSSL_SYS_VMS)
 # include <opcdef.h>
 # include <descrip.h>
@@ -197,10 +199,8 @@ static int slg_write(BIO *b, const char *in, int inl)
 
     if (inl < 0)
         return 0;
-    if ((buf = OPENSSL_malloc(inl + 1)) == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+    if ((buf = OPENSSL_malloc(inl + 1)) == NULL)
         return 0;
-    }
     memcpy(buf, in, inl);
     buf[inl] = '\0';
 

@@ -109,7 +109,7 @@ static int print_labeled_bignum(BIO *out, const char *label, const BIGNUM *bn)
         if ((bytes % 15) == 0 && bytes > 0) {
             if (BIO_printf(out, ":\n%s", spaces) <= 0)
                 goto err;
-            use_sep = 0; /* The first byte on the next line doesnt have a : */
+            use_sep = 0; /* The first byte on the next line doesn't have a : */
         }
         if (BIO_printf(out, "%s%c%c", use_sep ? ":" : "",
                        tolower(p[0]), tolower(p[1])) <= 0)
@@ -566,7 +566,7 @@ err:
 
 /* ---------------------------------------------------------------------- */
 
-#ifndef OPENSSL_NO_EC
+#ifndef OPENSSL_NO_ECX
 static int ecx_to_text(BIO *out, const void *key, int selection)
 {
     const ECX_KEY *ecx = key;
@@ -664,7 +664,7 @@ static int rsa_to_text(BIO *out, const void *key, int selection)
     coeffs = sk_BIGNUM_const_new_null();
 
     if (factors == NULL || exps == NULL || coeffs == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_PROV, ERR_R_CRYPTO_LIB);
         goto err;
     }
 
@@ -867,7 +867,7 @@ static int key2text_encode(void *vctx, const void *key, int selection,
           (void (*)(void))impl##2text_free_object },                    \
         { OSSL_FUNC_ENCODER_ENCODE,                                     \
           (void (*)(void))impl##2text_encode },                         \
-        { 0, NULL }                                                     \
+        OSSL_DISPATCH_END                                               \
     }
 
 #ifndef OPENSSL_NO_DH
@@ -882,10 +882,12 @@ MAKE_TEXT_ENCODER(ec, ec);
 # ifndef OPENSSL_NO_SM2
 MAKE_TEXT_ENCODER(sm2, ec);
 # endif
+# ifndef OPENSSL_NO_ECX
 MAKE_TEXT_ENCODER(ed25519, ecx);
 MAKE_TEXT_ENCODER(ed448, ecx);
 MAKE_TEXT_ENCODER(x25519, ecx);
 MAKE_TEXT_ENCODER(x448, ecx);
+# endif
 #endif
 MAKE_TEXT_ENCODER(rsa, rsa);
 MAKE_TEXT_ENCODER(rsapss, rsa);

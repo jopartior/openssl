@@ -2838,6 +2838,8 @@ static const ec_list_element curve_list[] = {
     {NID_secp384r1, &_EC_NIST_PRIME_384.h,
 # if defined(S390X_EC_ASM)
      EC_GFp_s390x_nistp384_method,
+# elif !defined(OPENSSL_NO_EC_NISTP_64_GCC_128)
+     ossl_ec_GFp_nistp384_method,
 # else
      0,
 # endif
@@ -2931,6 +2933,8 @@ static const ec_list_element curve_list[] = {
     {NID_secp384r1, &_EC_NIST_PRIME_384.h,
 # if defined(S390X_EC_ASM)
      EC_GFp_s390x_nistp384_method,
+# elif !defined(OPENSSL_NO_EC_NISTP_64_GCC_128)
+     ossl_ec_GFp_nistp384_method,
 # else
      0,
 # endif
@@ -3151,7 +3155,7 @@ static EC_GROUP *ec_group_new_from_data(OSSL_LIB_CTX *libctx,
                                     curve.meth != NULL ? curve.meth() : NULL);
 
     if ((ctx = BN_CTX_new_ex(libctx)) == NULL) {
-        ERR_raise(ERR_LIB_EC, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_EC, ERR_R_BN_LIB);
         goto err;
     }
 

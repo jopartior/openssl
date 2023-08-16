@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2023 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright 2005 Nokia. All rights reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
@@ -106,26 +106,21 @@ SSL_SESSION *SSL_SESSION_new(void)
         return NULL;
 
     ss = OPENSSL_zalloc(sizeof(*ss));
-    if (ss == NULL) {
-        ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
+    if (ss == NULL)
         return NULL;
-    }
 
     ss->verify_result = 1;      /* avoid 0 (= X509_V_OK) just in case */
-    ss->references = 1;
    /* 5 minute timeout by default */
     ss->timeout = ossl_seconds2time(60 * 5 + 4);
     ss->time = ossl_time_now();
     ssl_session_calculate_timeout(ss);
-    ss->lock = CRYPTO_THREAD_lock_new();
-    if (ss->lock == NULL) {
-        ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
+    if (!CRYPTO_NEW_REF(&ss->references, 1)) {
         OPENSSL_free(ss);
         return NULL;
     }
 
     if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_SSL_SESSION, ss, &ss->ex_data)) {
-        CRYPTO_THREAD_lock_free(ss->lock);
+        CRYPTO_FREE_REF(&ss->references);
         OPENSSL_free(ss);
         return NULL;
     }
@@ -146,9 +141,8 @@ SSL_SESSION *ssl_session_dup(const SSL_SESSION *src, int ticket)
     SSL_SESSION *dest;
 
     dest = OPENSSL_malloc(sizeof(*dest));
-    if (dest == NULL) {
-        goto err;
-    }
+    if (dest == NULL)
+        return NULL;
     memcpy(dest, src, sizeof(*dest));
 
     /*
@@ -167,58 +161,70 @@ SSL_SESSION *ssl_session_dup(const SSL_SESSION *src, int ticket)
 #endif
     dest->peer_chain = NULL;
     dest->peer = NULL;
+    dest->peer_rpk = NULL;
     dest->ticket_appdata = NULL;
     memset(&dest->ex_data, 0, sizeof(dest->ex_data));
 
-    /* We deliberately don't copy the prev and next pointers */
+    /* As the copy is not in the cache, we remove the associated pointers */
     dest->prev = NULL;
     dest->next = NULL;
+    dest->owner = NULL;
 
-    dest->references = 1;
+    if (!CRYPTO_NEW_REF(&dest->references, 1)) {
+        OPENSSL_free(dest);
+        return NULL;
+    }
 
-    dest->lock = CRYPTO_THREAD_lock_new();
-    if (dest->lock == NULL)
+    if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_SSL_SESSION, dest, &dest->ex_data)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_CRYPTO_LIB);
         goto err;
-
-    if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_SSL_SESSION, dest, &dest->ex_data))
-        goto err;
+    }
 
     if (src->peer != NULL) {
-        if (!X509_up_ref(src->peer))
+        if (!X509_up_ref(src->peer)) {
+            ERR_raise(ERR_LIB_SSL, ERR_R_X509_LIB);
             goto err;
+        }
         dest->peer = src->peer;
     }
 
     if (src->peer_chain != NULL) {
         dest->peer_chain = X509_chain_up_ref(src->peer_chain);
-        if (dest->peer_chain == NULL)
+        if (dest->peer_chain == NULL) {
+            ERR_raise(ERR_LIB_SSL, ERR_R_X509_LIB);
             goto err;
+        }
     }
+
+    if (src->peer_rpk != NULL) {
+        if (!EVP_PKEY_up_ref(src->peer_rpk))
+            goto err;
+        dest->peer_rpk = src->peer_rpk;
+    }
+
 #ifndef OPENSSL_NO_PSK
     if (src->psk_identity_hint) {
         dest->psk_identity_hint = OPENSSL_strdup(src->psk_identity_hint);
-        if (dest->psk_identity_hint == NULL) {
+        if (dest->psk_identity_hint == NULL)
             goto err;
-        }
     }
     if (src->psk_identity) {
         dest->psk_identity = OPENSSL_strdup(src->psk_identity);
-        if (dest->psk_identity == NULL) {
+        if (dest->psk_identity == NULL)
             goto err;
-        }
     }
 #endif
 
     if (!CRYPTO_dup_ex_data(CRYPTO_EX_INDEX_SSL_SESSION,
                             &dest->ex_data, &src->ex_data)) {
+        ERR_raise(ERR_LIB_SSL, ERR_R_CRYPTO_LIB);
         goto err;
     }
 
     if (src->ext.hostname) {
         dest->ext.hostname = OPENSSL_strdup(src->ext.hostname);
-        if (dest->ext.hostname == NULL) {
+        if (dest->ext.hostname == NULL)
             goto err;
-        }
     }
 
     if (ticket != 0 && src->ext.tick != NULL) {
@@ -241,9 +247,8 @@ SSL_SESSION *ssl_session_dup(const SSL_SESSION *src, int ticket)
 #ifndef OPENSSL_NO_SRP
     if (src->srp_username) {
         dest->srp_username = OPENSSL_strdup(src->srp_username);
-        if (dest->srp_username == NULL) {
+        if (dest->srp_username == NULL)
             goto err;
-        }
     }
 #endif
 
@@ -256,7 +261,6 @@ SSL_SESSION *ssl_session_dup(const SSL_SESSION *src, int ticket)
 
     return dest;
  err:
-    ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
     SSL_SESSION_free(dest);
     return NULL;
 }
@@ -296,10 +300,15 @@ static int def_generate_session_id(SSL *ssl, unsigned char *id,
                                    unsigned int *id_len)
 {
     unsigned int retry = 0;
-    do
+    do {
         if (RAND_bytes_ex(ssl->ctx->libctx, id, *id_len, 0) <= 0)
             return 0;
-    while (SSL_has_matching_session_id(ssl, id, *id_len) &&
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (retry > 0) {
+            id[0]++;
+        }
+#endif
+    } while (SSL_has_matching_session_id(ssl, id, *id_len) &&
            (++retry < MAX_SESS_ID_ATTEMPTS)) ;
     if (retry < MAX_SESS_ID_ATTEMPTS)
         return 1;
@@ -409,7 +418,7 @@ int ssl_get_new_session(SSL_CONNECTION *s, int session)
     SSL_SESSION *ss = NULL;
 
     if ((ss = SSL_SESSION_new()) == NULL) {
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_MALLOC_FAILURE);
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_SSL_LIB);
         return 0;
     }
 
@@ -805,7 +814,7 @@ void SSL_SESSION_free(SSL_SESSION *ss)
 
     if (ss == NULL)
         return;
-    CRYPTO_DOWN_REF(&ss->references, &i, ss->lock);
+    CRYPTO_DOWN_REF(&ss->references, &i);
     REF_PRINT_COUNT("SSL_SESSION", ss);
     if (i > 0)
         return;
@@ -816,6 +825,7 @@ void SSL_SESSION_free(SSL_SESSION *ss)
     OPENSSL_cleanse(ss->master_key, sizeof(ss->master_key));
     OPENSSL_cleanse(ss->session_id, sizeof(ss->session_id));
     X509_free(ss->peer);
+    EVP_PKEY_free(ss->peer_rpk);
     OSSL_STACK_OF_X509_free(ss->peer_chain);
     OPENSSL_free(ss->ext.hostname);
     OPENSSL_free(ss->ext.tick);
@@ -828,7 +838,7 @@ void SSL_SESSION_free(SSL_SESSION *ss)
 #endif
     OPENSSL_free(ss->ext.alpn_selected);
     OPENSSL_free(ss->ticket_appdata);
-    CRYPTO_THREAD_lock_free(ss->lock);
+    CRYPTO_FREE_REF(&ss->references);
     OPENSSL_clear_free(ss, sizeof(*ss));
 }
 
@@ -836,7 +846,7 @@ int SSL_SESSION_up_ref(SSL_SESSION *ss)
 {
     int i;
 
-    if (CRYPTO_UP_REF(&ss->references, &i, ss->lock) <= 0)
+    if (CRYPTO_UP_REF(&ss->references, &i) <= 0)
         return 0;
 
     REF_PRINT_COUNT("SSL_SESSION", ss);
@@ -852,8 +862,8 @@ int SSL_set_session(SSL *s, SSL_SESSION *session)
         return 0;
 
     ssl_clear_bad_session(sc);
-    if (s->ctx->method != s->method) {
-        if (!SSL_set_ssl_method(s, s->ctx->method))
+    if (s->defltmeth != s->method) {
+        if (!SSL_set_ssl_method(s, s->defltmeth))
             return 0;
     }
 
@@ -1035,6 +1045,11 @@ X509 *SSL_SESSION_get0_peer(SSL_SESSION *s)
     return s->peer;
 }
 
+EVP_PKEY *SSL_SESSION_get0_peer_rpk(SSL_SESSION *s)
+{
+    return s->peer_rpk;
+}
+
 int SSL_SESSION_set1_id_context(SSL_SESSION *s, const unsigned char *sid_ctx,
                                 unsigned int sid_ctx_len)
 {
@@ -1116,10 +1131,8 @@ int SSL_set_session_ticket_ext(SSL *s, void *ext_data, int ext_len)
         sc->ext.session_ticket = NULL;
         sc->ext.session_ticket =
             OPENSSL_malloc(sizeof(TLS_SESSION_TICKET_EXT) + ext_len);
-        if (sc->ext.session_ticket == NULL) {
-            ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
+        if (sc->ext.session_ticket == NULL)
             return 0;
-        }
 
         if (ext_data != NULL) {
             sc->ext.session_ticket->length = ext_len;

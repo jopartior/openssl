@@ -84,10 +84,8 @@ X509_VERIFY_PARAM *X509_VERIFY_PARAM_new(void)
     X509_VERIFY_PARAM *param;
 
     param = OPENSSL_zalloc(sizeof(*param));
-    if (param == NULL) {
-        ERR_raise(ERR_LIB_X509, ERR_R_MALLOC_FAILURE);
+    if (param == NULL)
         return NULL;
-    }
     param->trust = X509_TRUST_DEFAULT;
     /* param->inh_flags = X509_VP_FLAG_DEFAULT; */
     param->depth = -1;
@@ -337,7 +335,10 @@ int X509_VERIFY_PARAM_add0_policy(X509_VERIFY_PARAM *param,
         if (param->policies == NULL)
             return 0;
     }
-    return sk_ASN1_OBJECT_push(param->policies, policy);
+
+    if (sk_ASN1_OBJECT_push(param->policies, policy) <= 0)
+        return 0;
+    return 1;
 }
 
 int X509_VERIFY_PARAM_set1_policies(X509_VERIFY_PARAM *param,
@@ -609,7 +610,10 @@ int X509_VERIFY_PARAM_add0_table(X509_VERIFY_PARAM *param)
             X509_VERIFY_PARAM_free(ptmp);
         }
     }
-    return sk_X509_VERIFY_PARAM_push(param_table, param);
+
+    if (sk_X509_VERIFY_PARAM_push(param_table, param) <= 0)
+        return 0;
+    return 1;
 }
 
 int X509_VERIFY_PARAM_get_count(void)
@@ -637,6 +641,8 @@ const X509_VERIFY_PARAM *X509_VERIFY_PARAM_lookup(const char *name)
 
     pm.name = (char *)name;
     if (param_table != NULL) {
+        /* Ideally, this would be done under a lock */
+        sk_X509_VERIFY_PARAM_sort(param_table);
         idx = sk_X509_VERIFY_PARAM_find(param_table, &pm);
         if (idx >= 0)
             return sk_X509_VERIFY_PARAM_value(param_table, idx);

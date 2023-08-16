@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <openssl/crypto.h>
+#include "internal/numbers.h"
 #include "bio_local.h"
 
 /*
@@ -81,30 +82,22 @@ BIO *BIO_new_ex(OSSL_LIB_CTX *libctx, const BIO_METHOD *method)
 {
     BIO *bio = OPENSSL_zalloc(sizeof(*bio));
 
-    if (bio == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+    if (bio == NULL)
         return NULL;
-    }
 
     bio->libctx = libctx;
     bio->method = method;
     bio->shutdown = 1;
-    bio->references = 1;
+
+    if (!CRYPTO_NEW_REF(&bio->references, 1))
+        goto err;
 
     if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data))
         goto err;
 
-    bio->lock = CRYPTO_THREAD_lock_new();
-    if (bio->lock == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
-        CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data);
-        goto err;
-    }
-
     if (method->create != NULL && !method->create(bio)) {
         ERR_raise(ERR_LIB_BIO, ERR_R_INIT_FAIL);
         CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data);
-        CRYPTO_THREAD_lock_free(bio->lock);
         goto err;
     }
     if (method->create == NULL)
@@ -113,6 +106,7 @@ BIO *BIO_new_ex(OSSL_LIB_CTX *libctx, const BIO_METHOD *method)
     return bio;
 
 err:
+    CRYPTO_FREE_REF(&bio->references);
     OPENSSL_free(bio);
     return NULL;
 }
@@ -129,7 +123,7 @@ int BIO_free(BIO *a)
     if (a == NULL)
         return 0;
 
-    if (CRYPTO_DOWN_REF(&a->references, &ret, a->lock) <= 0)
+    if (CRYPTO_DOWN_REF(&a->references, &ret) <= 0)
         return 0;
 
     REF_PRINT_COUNT("BIO", a);
@@ -148,7 +142,7 @@ int BIO_free(BIO *a)
 
     CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, a, &a->ex_data);
 
-    CRYPTO_THREAD_lock_free(a->lock);
+    CRYPTO_FREE_REF(&a->references);
 
     OPENSSL_free(a);
 
@@ -194,7 +188,7 @@ int BIO_up_ref(BIO *a)
 {
     int i;
 
-    if (CRYPTO_UP_REF(&a->references, &i, a->lock) <= 0)
+    if (CRYPTO_UP_REF(&a->references, &i) <= 0)
         return 0;
 
     REF_PRINT_COUNT("BIO", a);
@@ -491,6 +485,16 @@ int BIO_recvmmsg(BIO *b, BIO_MSG *msg,
     return ret;
 }
 
+int BIO_get_rpoll_descriptor(BIO *b, BIO_POLL_DESCRIPTOR *desc)
+{
+    return BIO_ctrl(b, BIO_CTRL_GET_RPOLL_DESCRIPTOR, 0, desc);
+}
+
+int BIO_get_wpoll_descriptor(BIO *b, BIO_POLL_DESCRIPTOR *desc)
+{
+    return BIO_ctrl(b, BIO_CTRL_GET_WPOLL_DESCRIPTOR, 0, desc);
+}
+
 int BIO_puts(BIO *b, const char *buf)
 {
     int ret;
@@ -714,12 +718,28 @@ long BIO_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
  */
 size_t BIO_ctrl_pending(BIO *bio)
 {
-    return BIO_ctrl(bio, BIO_CTRL_PENDING, 0, NULL);
+    long ret = BIO_ctrl(bio, BIO_CTRL_PENDING, 0, NULL);
+
+    if (ret < 0)
+        ret = 0;
+#if LONG_MAX > SIZE_MAX
+    if (ret > SIZE_MAX)
+        ret = SIZE_MAX;
+#endif
+    return (size_t)ret;
 }
 
 size_t BIO_ctrl_wpending(BIO *bio)
 {
-    return BIO_ctrl(bio, BIO_CTRL_WPENDING, 0, NULL);
+    long ret = BIO_ctrl(bio, BIO_CTRL_WPENDING, 0, NULL);
+
+    if (ret < 0)
+        ret = 0;
+#if LONG_MAX > SIZE_MAX
+    if (ret > SIZE_MAX)
+        ret = SIZE_MAX;
+#endif
+    return (size_t)ret;
 }
 
 /* put the 'bio' on the end of b's list of operators */
@@ -833,7 +853,7 @@ void BIO_free_all(BIO *bio)
 
     while (bio != NULL) {
         b = bio;
-        ref = b->references;
+        CRYPTO_GET_REF(&b->references, &ref);
         bio = bio->next_bio;
         BIO_free(b);
         /* Since ref count > 1, don't free anyone else. */
@@ -861,7 +881,7 @@ BIO *BIO_dup_chain(BIO *in)
         /* This will let SSL_s_sock() work with stdin/stdout */
         new_bio->num = bio->num;
 
-        if (!BIO_dup_state(bio, (char *)new_bio)) {
+        if (BIO_dup_state(bio, (char *)new_bio) <= 0) {
             BIO_free(new_bio);
             goto err;
         }
@@ -930,11 +950,10 @@ void bio_cleanup(void)
     CRYPTO_THREAD_lock_free(bio_lookup_lock);
     bio_lookup_lock = NULL;
 #endif
-    CRYPTO_THREAD_lock_free(bio_type_lock);
-    bio_type_lock = NULL;
+    CRYPTO_FREE_REF(&bio_type_count);
 }
 
-/* Internal variant of the below BIO_wait() not calling BIOerr() */
+/* Internal variant of the below BIO_wait() not calling ERR_raise(...) */
 static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
 {
 #ifndef OPENSSL_NO_SOCK
@@ -963,7 +982,7 @@ static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
         if ((unsigned long)sec_diff * 1000 < nap_milliseconds)
             nap_milliseconds = (unsigned int)sec_diff * 1000;
     }
-    ossl_sleep(nap_milliseconds);
+    OSSL_sleep(nap_milliseconds);
     return 1;
 }
 
@@ -972,7 +991,7 @@ static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
  * Succeed immediately if max_time == 0.
  * If sockets are not available support polling: succeed after waiting at most
  * the number of nap_milliseconds in order to avoid a tight busy loop.
- * Call BIOerr(...) on timeout or error.
+ * Call ERR_raise(ERR_LIB_BIO, ...) on timeout or error.
  * Returns -1 on error, 0 on timeout, and 1 on success.
  */
 int BIO_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)

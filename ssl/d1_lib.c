@@ -21,8 +21,6 @@ static size_t dtls1_link_min_mtu(void);
 static const size_t g_probable_mtu[] = { 1500, 512, 256 };
 
 const SSL3_ENC_METHOD DTLSv1_enc_data = {
-    tls1_enc,
-    tls1_mac_old,
     tls1_setup_key_block,
     tls1_generate_master_secret,
     tls1_change_cipher_state,
@@ -38,8 +36,6 @@ const SSL3_ENC_METHOD DTLSv1_enc_data = {
 };
 
 const SSL3_ENC_METHOD DTLSv1_2_enc_data = {
-    tls1_enc,
-    tls1_mac_old,
     tls1_setup_key_block,
     tls1_generate_master_secret,
     tls1_change_cipher_state,
@@ -229,7 +225,7 @@ long dtls1_ctrl(SSL *ssl, int cmd, long larg, void *parg)
 
     switch (cmd) {
     case DTLS_CTRL_GET_TIMEOUT:
-        if (dtls1_get_timeout(s, &t) != NULL) {
+        if (dtls1_get_timeout(s, &t)) {
             *(struct timeval *)parg = ossl_time_to_timeval(t);
             ret = 1;
         }
@@ -260,9 +256,15 @@ long dtls1_ctrl(SSL *ssl, int cmd, long larg, void *parg)
     return ret;
 }
 
+static void dtls1_bio_set_next_timeout(BIO * bio, const DTLS1_STATE *d1)
+{
+    struct timeval tv = ossl_time_to_timeval(d1->next_timeout);
+
+    BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_NEXT_TIMEOUT, 0, &tv);
+}
+
 void dtls1_start_timer(SSL_CONNECTION *s)
 {
-    struct timeval tv;
     OSSL_TIME duration;
     SSL *ssl = SSL_CONNECTION_GET_SSL(s);
 
@@ -289,17 +291,17 @@ void dtls1_start_timer(SSL_CONNECTION *s)
     duration = ossl_us2time(s->d1->timeout_duration_us);
     s->d1->next_timeout = ossl_time_add(ossl_time_now(), duration);
 
-    tv = ossl_time_to_timeval(s->d1->next_timeout);
-    BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_NEXT_TIMEOUT, 0, &tv);
+    /* set s->d1->next_timeout into ssl->rbio interface */
+    dtls1_bio_set_next_timeout(SSL_get_rbio(ssl), s->d1);
 }
 
-OSSL_TIME *dtls1_get_timeout(SSL_CONNECTION *s, OSSL_TIME *timeleft)
+int dtls1_get_timeout(const SSL_CONNECTION *s, OSSL_TIME *timeleft)
 {
     OSSL_TIME timenow;
 
     /* If no timeout is set, just return NULL */
     if (ossl_time_is_zero(s->d1->next_timeout))
-        return NULL;
+        return 0;
 
     /* Get current time */
     timenow = ossl_time_now();
@@ -312,7 +314,7 @@ OSSL_TIME *dtls1_get_timeout(SSL_CONNECTION *s, OSSL_TIME *timeleft)
     *timeleft = ossl_time_subtract(s->d1->next_timeout, timenow);
     if (ossl_time_compare(*timeleft, ossl_ms2time(15)) <= 0)
         *timeleft = ossl_time_zero();
-    return timeleft;
+    return 1;
 }
 
 int dtls1_is_timer_expired(SSL_CONNECTION *s)
@@ -320,14 +322,12 @@ int dtls1_is_timer_expired(SSL_CONNECTION *s)
     OSSL_TIME timeleft;
 
     /* Get time left until timeout, return false if no timer running */
-    if (dtls1_get_timeout(s, &timeleft) == NULL) {
+    if (!dtls1_get_timeout(s, &timeleft))
         return 0;
-    }
 
     /* Return false if timer is not expired yet */
-    if (!ossl_time_is_zero(timeleft)) {
+    if (!ossl_time_is_zero(timeleft))
         return 0;
-    }
 
     /* Timer expired, so return true */
     return 1;
@@ -342,14 +342,11 @@ static void dtls1_double_timeout(SSL_CONNECTION *s)
 
 void dtls1_stop_timer(SSL_CONNECTION *s)
 {
-    struct timeval tv;
-
     /* Reset everything */
     s->d1->timeout_num_alerts = 0;
     s->d1->next_timeout = ossl_time_zero();
     s->d1->timeout_duration_us = 1000000;
-    tv = ossl_time_to_timeval(s->d1->next_timeout);
-    BIO_ctrl(s->rbio, BIO_CTRL_DGRAM_SET_NEXT_TIMEOUT, 0, &tv);
+    dtls1_bio_set_next_timeout(s->rbio, s->d1);
     /* Clear retransmission buffer */
     dtls1_clear_sent_buffer(s);
 }
@@ -454,16 +451,14 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
         return -1;
     }
 
-    if (!ssl3_setup_buffers(s)) {
-        /* ERR_raise() already called */
-        return -1;
-    }
     buf = OPENSSL_malloc(DTLS1_RT_HEADER_LENGTH + SSL3_RT_MAX_PLAIN_LENGTH);
-    if (buf == NULL) {
-        ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
+    if (buf == NULL)
+        return -1;
+    wbuf = OPENSSL_malloc(DTLS1_RT_HEADER_LENGTH + SSL3_RT_MAX_PLAIN_LENGTH);
+    if (wbuf == NULL) {
+        OPENSSL_free(buf);
         return -1;
     }
-    wbuf = RECORD_LAYER_get_wbuf(&s->rlayer)[0].buf;
 
     do {
         /* Get a packet */
@@ -745,7 +740,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
                                 s->msg_callback_arg);
 
             if ((tmpclient = BIO_ADDR_new()) == NULL) {
-                ERR_raise(ERR_LIB_SSL, ERR_R_MALLOC_FAILURE);
+                ERR_raise(ERR_LIB_SSL, ERR_R_BIO_LIB);
                 goto end;
             }
 
@@ -792,7 +787,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
     s->d1->handshake_read_seq = 1;
     s->d1->handshake_write_seq = 1;
     s->d1->next_handshake_write_seq = 1;
-    DTLS_RECORD_LAYER_set_write_sequence(&s->rlayer, seq);
+    s->rlayer.wrlmethod->increment_sequence_ctr(s->rlayer.wrl);
 
     /*
      * We are doing cookie exchange, so make sure we set that option in the
@@ -826,9 +821,9 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
     if (!ssl_set_new_record_layer(s,
                                   DTLS_ANY_VERSION,
                                   OSSL_RECORD_DIRECTION_READ,
-                                  OSSL_RECORD_PROTECTION_LEVEL_NONE,
+                                  OSSL_RECORD_PROTECTION_LEVEL_NONE, NULL, 0,
                                   NULL, 0, NULL, 0, NULL,  0, NULL, 0,
-                                  NID_undef, NULL, NULL)) {
+                                  NID_undef, NULL, NULL, NULL)) {
         /* SSLfatal already called */
         ret = -1;
         goto end;
@@ -838,6 +833,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
  end:
     BIO_ADDR_free(tmpclient);
     OPENSSL_free(buf);
+    OPENSSL_free(wbuf);
     return ret;
 }
 #endif

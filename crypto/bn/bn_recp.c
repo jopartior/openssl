@@ -21,10 +21,8 @@ BN_RECP_CTX *BN_RECP_CTX_new(void)
 {
     BN_RECP_CTX *ret;
 
-    if ((ret = OPENSSL_zalloc(sizeof(*ret))) == NULL) {
-        ERR_raise(ERR_LIB_BN, ERR_R_MALLOC_FAILURE);
+    if ((ret = OPENSSL_zalloc(sizeof(*ret))) == NULL)
         return NULL;
-    }
 
     bn_init(&(ret->N));
     bn_init(&(ret->Nr));
@@ -44,7 +42,7 @@ void BN_RECP_CTX_free(BN_RECP_CTX *recp)
 
 int BN_RECP_CTX_set(BN_RECP_CTX *recp, const BIGNUM *d, BN_CTX *ctx)
 {
-    if (!BN_copy(&(recp->N), d))
+    if (BN_is_zero(d) || !BN_copy(&(recp->N), d))
         return 0;
     BN_zero(&(recp->Nr));
     recp->num_bits = BN_num_bits(d);

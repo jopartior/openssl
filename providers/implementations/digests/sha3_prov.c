@@ -182,6 +182,7 @@ static int s390x_keccakc_final(unsigned char *md, void *vctx, int padding)
     KECCAK1600_CTX *ctx = vctx;
     size_t bsz = ctx->block_size;
     size_t num = ctx->bufsz;
+    size_t needed = ctx->md_size;
 
     if (!ossl_prov_is_running())
         return 0;
@@ -191,7 +192,12 @@ static int s390x_keccakc_final(unsigned char *md, void *vctx, int padding)
     ctx->buf[num] = padding;
     ctx->buf[bsz - 1] |= 0x80;
     s390x_kimd(ctx->buf, bsz, ctx->pad, ctx->A);
-    memcpy(md, ctx->A, ctx->md_size);
+    num = needed > bsz ? bsz : needed;
+    memcpy(md, ctx->A, num);
+    needed -= num;
+    if (needed > 0)
+        s390x_klmd(NULL, 0, md + bsz, needed, ctx->pad | S390X_KLMD_PS, ctx->A);
+
     return 1;
 }
 
@@ -240,6 +246,40 @@ static PROV_SHA3_METHOD kmac_s390x_md =
     if (S390_SHA3_CAPABLE(SHAKE_##bitlen)) {                                   \
         ctx->pad = S390X_SHAKE_##bitlen;                                       \
         ctx->meth = kmac_s390x_md;                                             \
+    } else {                                                                   \
+        ctx->meth = sha3_generic_md;                                           \
+    }
+#elif defined(__aarch64__)
+# include "arm_arch.h"
+
+static sha3_absorb_fn armsha3_sha3_absorb;
+
+size_t SHA3_absorb_cext(uint64_t A[5][5], const unsigned char *inp, size_t len,
+                    size_t r);
+/*-
+ * Hardware-assisted ARMv8.2 SHA3 extension version of the absorb()
+ */
+static size_t armsha3_sha3_absorb(void *vctx, const void *inp, size_t len)
+{
+    KECCAK1600_CTX *ctx = vctx;
+
+    return SHA3_absorb_cext(ctx->A, inp, len, ctx->block_size);
+}
+
+static PROV_SHA3_METHOD sha3_ARMSHA3_md =
+{
+    armsha3_sha3_absorb,
+    generic_sha3_final
+};
+# define SHA3_SET_MD(uname, typ)                                               \
+    if (OPENSSL_armcap_P & ARMV8_HAVE_SHA3_AND_WORTH_USING) {                  \
+        ctx->meth = sha3_ARMSHA3_md;                                           \
+    } else {                                                                   \
+        ctx->meth = sha3_generic_md;                                           \
+    }
+# define KMAC_SET_MD(bitlen)                                                   \
+    if (OPENSSL_armcap_P & ARMV8_HAVE_SHA3_AND_WORTH_USING) {                  \
+        ctx->meth = sha3_ARMSHA3_md;                                           \
     } else {                                                                   \
         ctx->meth = sha3_generic_md;                                           \
     }
